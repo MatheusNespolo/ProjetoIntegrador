@@ -1,0 +1,4 @@
+// Salva o valor do setpoint no contexto do fluxo
+flow.set("setpoint", msg.payload);
+return msg;
+// opcional: pode não retornar nada se não for usar adiante

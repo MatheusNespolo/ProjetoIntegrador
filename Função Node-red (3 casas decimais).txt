@@ -1,0 +1,32 @@
+Função Node-red (3 casas decimais)
+// Verifica se payload é um objeto
+if (typeof msg.payload !== 'object' || msg.payload === null) {
+    node.error("msg.payload não é um objeto válido", msg);
+    return null;
+}
+
+// Encontra o primeiro campo numérico (ou string numérica) dentro do objeto
+let valor = null;
+for (let key in msg.payload) {
+    if (Object.hasOwn(msg.payload, key)) {
+        const v = msg.payload[key];
+        if (typeof v === 'number' && Number.isFinite(v)) {
+            valor = v;
+            msg.payload[key] = Number(v.toFixed(3));
+            break;
+        } else if (typeof v === 'string' && !isNaN(Number(v))) {
+            const n = Number(v);
+            valor = n;
+            msg.payload[key] = Number(n.toFixed(3));
+            break;
+        }
+    }
+}
+
+// Se não encontrou nada numérico, retorna erro
+if (valor === null) {
+    node.error("Nenhum valor numérico encontrado no objeto payload", msg);
+    return null;
+}
+
+return msg;

@@ -1,0 +1,165 @@
+// Integrador IoT ESP8266
+// Sensor de fluxo
+volatile unsigned long pulseCount = 0;
+const float calibrationFactor = 450.0; // pulsos por litro (aproximadamente 2,25mm)
+
+void IRAM_ATTR pulseCounter() {
+  pulseCount++;
+}
+
+void setup() {
+  attachInterrupt(digitalPinToInterrupt(D5), pulseCounter, FALLING); // D5 = GPIO14
+}
+
+// Cálculo da vazão
+unsigned long lastTime = 0;
+float flowRate = 0.0; // L/min
+
+void calculateFlow() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastTime >= 1000) { // a cada 1s
+    detachInterrupt(digitalPinToInterrupt(D5));
+    
+    float pulsesPerSecond = pulseCount / ((currentTime - lastTime) / 1000.0);
+    flowRate = (pulsesPerSecond * 60.0) / calibrationFactor; // L/min
+    
+    pulseCount = 0;
+    lastTime = currentTime;
+    
+    attachInterrupt(digitalPinToInterrupt(D5), pulseCounter, FALLING);
+  }
+}
+
+// PID
+#include <PID_v1.h>
+
+double setpoint = 2.0; // L/min (atualização via MQTT)
+double input = flowRate;
+double output = 0;
+
+// Ajustar valores após testes
+double Kp = 2.0, Ki = 0.5, Kd = 0.1;
+PID myPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
+
+void setup() {
+  myPID.SetMode(AUTOMATIC);
+  myPID.SetOutputLimits(0, 1023); // para analogWrite (0-1023 no ESP8266)
+}
+
+void loop() {
+  calculateFlow();
+  input = flowRate;
+  myPID.Compute();
+  
+  analogWrite(D1, output); // D1 = GPIO5, controla bomba DC via MOSFET
+}
+
+// MQTT com AWS
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+
+const char* ssid = "SEU_WIFI";
+const char* password = "SUA_SENHA";
+
+// AWS IoT endpoint
+const char* mqtt_server = "a3bv11xq1ow4bk-ats.iot.us-east-1.amazonaws.com";
+const int mqtt_port = 8883;
+
+// Certificados (possível usar SPIFFS)
+const char* ca = "-----BEGIN CERTIFICATE-----
+MIIDQTCCAimgAwIBAgITBmyfz5m/jAo54vB4ikPmljZbyjANBgkqhkiG9w0BAQsF
+ADA5MQswCQYDVQQGEwJVUzEPMA0GA1UEChMGQW1hem9uMRkwFwYDVQQDExBBbWF6
+b24gUm9vdCBDQSAxMB4XDTE1MDUyNjAwMDAwMFoXDTM4MDExNzAwMDAwMFowOTEL
+MAkGA1UEBhMCVVMxDzANBgNVBAoTBkFtYXpvbjEZMBcGA1UEAxMQQW1hem9uIFJv
+b3QgQ0EgMTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALJ4gHHKeNXj
+ca9HgFB0fW7Y14h29Jlo91ghYPl0hAEvrAIthtOgQ3pOsqTQNroBvo3bSMgHFzZM
+9O6II8c+6zf1tRn4SWiw3te5djgdYZ6k/oI2peVKVuRF4fn9tBb6dNqcmzU5L/qw
+IFAGbHrQgLKm+a/sRxmPUDgH3KKHOVj4utWp+UhnMJbulHheb4mjUcAwhmahRWa6
+VOujw5H5SNz/0egwLX0tdHA114gk957EWW67c4cX8jJGKLhD+rcdqsq08p8kDi1L
+93FcXmn/6pUCyziKrlA4b9v7LWIbxcceVOF34GfID5yHI9Y/QCB/IIDEgEw+OyQm
+jgSubJrIqg0CAwEAAaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMC
+AYYwHQYDVR0OBBYEFIQYzIU07LwMlJQuCFmcx7IQTgoIMA0GCSqGSIb3DQEBCwUA
+A4IBAQCY8jdaQZChGsV2USggNiMOruYou6r4lK5IpDB/G/wkjUu0yKGX9rbxenDI
+U5PMCCjjmCXPI6T53iHTfIUJrU6adTrCC2qJeHZERxhlbI1Bjjt/msv0tadQ1wUs
+N+gDS63pYaACbvXy8MWy7Vu33PqUXHeeE6V/Uq2V8viTO96LXFvKWlJbYK8U90vv
+o/ufQJVtMVT8QtPHRh8jrdkPSHCa2XV4cdFyQzR1bldZwgJcJmApzyMZFo6IQ6XU
+5MsI+yMRQ+hDKXJioaldXgjUkK642M4UwtBV8ob2xJNDd2ZhwLnoQdeXeGADbkpy
+rqXRfboQnoZsG4q5WTP468SQvvG5
+-----END CERTIFICATE-----\n";
+const char* clientCrt = "-----BEGIN CERTIFICATE-----
+MIIDWTCCAkGgAwIBAgIUezjN/dhE2cUpXqlh1vhIqkr4DsIwDQYJKoZIhvcNAQEL
+BQAwTTFLMEkGA1UECwxCQW1hem9uIFdlYiBTZXJ2aWNlcyBPPUFtYXpvbi5jb20g
+SW5jLiBMPVNlYXR0bGUgU1Q9V2FzaGluZ3RvbiBDPVVTMB4XDTI1MTAyMTEyMzkw
+M1oXDTQ5MTIzMTIzNTk1OVowHjEcMBoGA1UEAwwTQVdTIElvVCBDZXJ0aWZpY2F0
+ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMWx3kxc5Zl/AGM9yqyT
+uTqS1e5XSnMpwRZ4f+ROHtebbJ5C3fsxSPbPnPprfni6bkhqmx7FWw2EK9DLlPfM
+OjVptrZRVTuVqImE4RUb1xmvfAxwdcdB/cPDYf9f5rEY7T6+YfXZvHdlfXEYTRZn
+mymOg10ScfvftAq4Q0KDNzgrDSF2aJTXl/xRyEWWmM7lmwQ4Ceo1D4OMBt1ERlwv
+eU2VzZKQaFjQtCnMWAIUsOnTbALcZfVHcDXHiIc7tKOFIXVAsGAPLHJ8uHV/Qq2D
+9axzIK2nSWiEqtpMqMPxMBUjGZ/fA1dEzOOnDiX71M8qbf5+NCdLjO5/TtapVErQ
+YzMCAwEAAaNgMF4wHwYDVR0jBBgwFoAUzqln80+9uySO/8ZMY8T4P9gT4bswHQYD
+VR0OBBYEFEsFWKlwS5ICJxbIQoaN8JcokpECMAwGA1UdEwEB/wQCMAAwDgYDVR0P
+AQH/BAQDAgeAMA0GCSqGSIb3DQEBCwUAA4IBAQBr/g9xhxRM2FGCEjridkjiZxS8
+6Y4foydSDkpRWIVf4CBRpMFHcAF9yEyAUwKUr9I4LU+hsdYtjw76lboOW01dCTA+
+maHu7Bidw/VG+azxwemo83M6f2ZBVyGtRd58IlbOFEXPO8QU1KsIPKvGhkc0D5pP
+IgEU4pGzoUHKHAYZeN6s/IZa7GJV89KjRuLTkxnTYVUQoRisn/HdhQRJtpSuh9oC
+qW8pYBqoMUrDdvVM7qotaQ9GSfTDAJ5T7u49v0oZFVX+yiCo1c2kQYZz9bsLehS2
+JR/v2xxhAlM/Suw6P2qqzP4zvZv05GHo8gQj6Mt5efQsze4ScctGiiW1p+j5
+-----END CERTIFICATE-----
+\n";
+const char* clientKey = "-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAxbHeTFzlmX8AYz3KrJO5OpLV7ldKcynBFnh/5E4e15tsnkLd
++zFI9s+c+mt+eLpuSGqbHsVbDYQr0MuU98w6NWm2tlFVO5WoiYThFRvXGa98DHB1
+x0H9w8Nh/1/msRjtPr5h9dm8d2V9cRhNFmebKY6DXRJx+9+0CrhDQoM3OCsNIXZo
+lNeX/FHIRZaYzuWbBDgJ6jUPg4wG3URGXC95TZXNkpBoWNC0KcxYAhSw6dNsAtxl
+9UdwNceIhzu0o4UhdUCwYA8scny4dX9CrYP1rHMgradJaISq2kyow/EwFSMZn98D
+V0TM46cOJfvUzypt/n40J0uM7n9O1qlUStBjMwIDAQABAoIBAQCwmaOrM5Em/Xyr
+KpfScmQVHvZcYz3ugm4qVJpqqB6FHCJ7feAudGhpkiz4xu3Di0bZCeJoKoScHmXF
+rxb0BUw6SqUdWKp6/8X+kuU+phAQseJueke8KAc4yWDRcCn0KgBE/G0l4cuqHM9i
+KAM08Hh7NwPCMKgCCGQc712mHPFHChuv+YwUQaXG9PHxPY8DUlrVRRYYBPExivhZ
+PeKgCoxACgXPUeMkUoPEdTnSpRLC2DjfLFA3/IPn8ltdXDnJ369PgKbFkRAwfWzE
+VQtsfSgupIK78REGAkopLXTuM4sHOh2rGoojOp6a/JLtFkCeVk2XXeHcMNzzYqiX
+gcfrEQqBAoGBAO36/zEdX+CZOjp1VhK+CGIaTRzn/iWWCZOHvRodOyB3VsFBZJpT
++/tpMlBzJUgBln9zU2zQf4mvVVJLOIB0nf9UobF0voAZ4XABPiI5cEnCtyEZjXaC
+rLNNI6DqPdtnYGocLnljmpUOZWAkaY9m66EBwvTUXSD4A7+Hy3pFjA8VAoGBANSp
++duK/2dPYpZAjBWPJN++489JUfMifUzD55oZZVsZdGfKLQ2ozYzIv4m6UWgIcY5b
+Lc/qcdy17LSFgxFQccNCWBgmMOJaFhUpmCnkVRFhP4aJusFgMm4pN7tCHtNoQ2YZ
+TsaNAZh/2dyPa0+aGYcIb298RLfJJbshn8uxD3snAoGALvlENeWeby7Pl4phmwF3
+liWq4vHH8JNVAJHiea0bZqUnsq29tdit/EofbFHOIhBuLGoPJYNiKUM6jCvc0z4x
+kZya7fQlRhPVs84K/aZoy6Zrj1UD30ib3ihzx+d0nkIhfdBiPAO1F4bn67pEO9IM
+4JMAcGMans9VrhCX0WK46qECgYBcLd0ui15PcnqCNDJEOgq6rSxjsh1CbSWwu43N
+HsrvJOZvApRqwktuhal4UnlsxZQrJ1yBLdby2yxhxylbvOnCwCQdO5ie1HuT6raZ
+Ge7BnMyDTXnUzhSt6VHN6kggTKZCQCAEMiSJ7IkLcGMMWvhLrp1Wzp+epiKjrVxt
+Vy8lqwKBgQCNFAcGuEYWaXVmWMj6glPi1xqldz5pmUtlhIUOMWWr0GqIg9UXob8g
+T82PUHaDUPBRLgsHcgcjVBfcYQS0hDMXDltg3pmygBjfqttKorhl43fbry4Tm+7m
+QExe12LmrOhILB6vLCzAEkLRNX1/z5G1CcsWGGXM1skaOueYSD1ACw==
+-----END RSA PRIVATE KEY-----
+\n";
+
+WiFiClientSecure wifiClient;
+PubSubClient mqttClient(mqtt_server, mqtt_port, callback, wifiClient);
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  String topicStr = String(topic);
+  if (topicStr == "vazao/setpoint") {
+    String value = "";
+    for (int i = 0; i < length; i++) {
+      value += (char)payload[i];
+    }
+    setpoint = value.toFloat();
+    Serial.print("Novo setpoint: "); Serial.println(setpoint);
+  }
+}
+
+void setupAWS() {
+  wifiClient.setCACert(ca);
+  wifiClient.setCertificate(clientCrt);
+  wifiClient.setPrivateKey(clientKey);
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(callback);
+}
